@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#101719">
+  <title>Snake Garden · PlayHub Sample</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='16' fill='%23101719'/%3E%3Cpath d='M18 18h28v14H18v14h28' fill='none' stroke='%23b5f579' stroke-width='10' stroke-linejoin='round'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/src/style.css">
+  <script type="module" src="/src/main.js"></script>
+</head>
+<body>
+  <main>
+    <header class="masthead"><a class="wordmark" href="/" aria-label="Snake Garden 처음 화면"><span class="logo" aria-hidden="true">S</span>SNAKE GARDEN</a><span class="edition">PLAYHUB LAB / 001</span></header>
+    <div class="layout">
+      <section class="intro" aria-labelledby="game-title">
+        <p class="eyebrow"><span class="live-dot" aria-hidden="true"></span> 작고 단순한, 한 판의 즐거움</p>
+        <h1 id="game-title">한 입 더.<br><span>조금 더 길게.</span></h1>
+        <p class="lede">먹이 하나에 +10점. 정원을 누비며 자라나요.<br>벽과 내 몸을 피해서 최고 기록에 도전하세요.</p>
+        <div class="instructions">
+          <h2>HOW TO PLAY</h2>
+          <ol><li><span class="rule-icon" aria-hidden="true">↗</span><div><strong>방향을 바꿔요</strong><p>방향키 · WASD · 화면 방향 버튼</p></div></li><li><span class="food-icon" aria-hidden="true"></span><div><strong>먹이 하나에 +10점</strong><p>먹을수록 길어지고 조금씩 빨라져요.</p></div></li><li><span class="rule-icon" aria-hidden="true">↺</span><div><strong>천천히, 다시 한 번</strong><p>벽이나 몸에 닿으면 한 판이 끝나요.</p></div></li></ol>
+        </div>
+        <section class="platform-panel" aria-labelledby="platform-title">
+          <h2 id="platform-title">PLAYHUB RECORDS</h2>
+          <p id="platform-status" role="status">연결을 준비하고 있어요.</p>
+          <p id="save-status" role="status">한 판을 마치면 기록을 확인하세요.</p>
+          <button id="platform-retry" class="secondary" hidden>다시 시도</button>
+          <a id="portal-link" href="http://127.0.0.1:3317/play/snake" hidden>PlayHub에서 기록 도전 →</a>
+          <div class="platform-ranking"><h3>TOP 5</h3><button id="ranking-refresh" class="secondary" hidden>랭킹 새로고침</button></div>
+          <p id="ranking-status" role="status"></p>
+          <ol id="ranking-list"></ol>
+        </section>
+      </section>
+
+      <section class="game" aria-label="스네이크 게임">
+        <div class="scoreboard"><div><span>이번 점수</span><strong id="score">000</strong></div><div><span>브라우저 최고</span><strong id="best">000</strong></div><div><span>길이</span><strong id="length">03</strong></div></div>
+        <div class="board-wrap">
+          <canvas id="board" width="600" height="600" tabindex="0" aria-label="스네이크 게임판. 방향키 또는 WASD로 이동하고 Space로 일시정지합니다." aria-describedby="keyboard-hint"></canvas>
+          <div id="overlay" class="overlay"><div class="overlay-content"><span id="overlay-kicker">READY WHEN YOU ARE</span><h2 id="overlay-title">첫 한 입을 향해.</h2><p id="overlay-description">시작하기를 누르면 뱀이 움직여요.</p></div></div>
+        </div>
+        <div class="actions"><button id="primary" class="primary">시작하기 <span aria-hidden="true">↗</span></button><button id="pause" class="secondary" disabled>일시정지</button><button id="restart" class="icon-button" aria-label="새 게임 시작" title="새 게임 시작" disabled>↻</button></div>
+        <p id="keyboard-hint" class="keyboard-hint"><kbd>↑</kbd><kbd>←</kbd><kbd>↓</kbd><kbd>→</kbd> 이동 <span>·</span> <kbd>Space</kbd> 일시정지 <span>·</span> 탭을 벗어나면 자동 정지</p>
+        <div class="touch-controls" role="group" aria-label="게임 방향 조작"><button class="up" data-direction="up" aria-label="위로 이동">↑</button><button class="left" data-direction="left" aria-label="왼쪽으로 이동">←</button><button class="down" data-direction="down" aria-label="아래로 이동">↓</button><button class="right" data-direction="right" aria-label="오른쪽으로 이동">→</button></div>
+        <p id="announcement" class="sr-only" role="status" aria-live="polite"></p>
+      </section>
+    </div>
+    <footer><span>GROW A LITTLE. TRY AGAIN.</span><span>게임은 독립적으로, 기록은 PlayHub로.</span></footer>
+  </main>
+</body>
+</html>

@@ -1,0 +1,20 @@
+# Local development only; these are deliberately non-production credentials.
+name: playhub-local
+logger:
+  level: INFO
+database:
+  address:
+    - "postgres:playhub-local-db@postgres:5432/nakama"
+runtime:
+  js_entrypoint: index.js
+  http_key: playhub-local-runtime-key
+socket:
+  server_key: playhub-local-server-key
+session:
+  token_expiry_sec: 7200
+  encryption_key: playhub-local-session-encryption-key
+  refresh_encryption_key: playhub-local-refresh-encryption-key
+console:
+  username: admin
+  password: playhub-local-console
+  signing_key: playhub-local-console-signing-key
