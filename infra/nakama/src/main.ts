@@ -18,5 +18,15 @@ const InitModule: nkruntime.InitModule = function (_ctx, logger, nk, _initialize
     nkruntime.Operator.BEST, null,
     { gameId: 'snake', title: 'Snake Garden' }, true,
   )
-  logger.info('PlayHub leaderboards ready: playhub-test, playhub-snake')
+  nk.leaderboardCreate(
+    'playhub-cosmic-merge', false, nkruntime.SortOrder.DESCENDING,
+    nkruntime.Operator.BEST, null,
+    { gameId: 'cosmic-merge', title: '코스믹 머지' }, true,
+  )
+  nk.leaderboardCreate(
+    'playhub-mungtari', false, nkruntime.SortOrder.DESCENDING,
+    nkruntime.Operator.BEST, null,
+    { gameId: 'mungtari', title: '멍타리 대전' }, true,
+  )
+  logger.info('PlayHub leaderboards ready: playhub-test, playhub-snake, playhub-cosmic-merge, playhub-mungtari')
 }

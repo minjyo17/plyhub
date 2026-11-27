@@ -6,7 +6,12 @@ export type Ranking = { records: RankEntry[]; myRecord: RankEntry | null }
 export type ConnectionOptions = { url: string; serverKey: string }
 type GuestStorage = Pick<Storage, 'getItem' | 'setItem'>
 
-const LEADERBOARDS: Record<string, string> = { 'test-game': 'playhub-test', snake: 'playhub-snake' }
+const LEADERBOARDS: Record<string, string> = {
+  'test-game': 'playhub-test',
+  snake: 'playhub-snake',
+  'cosmic-merge': 'playhub-cosmic-merge',
+  mungtari: 'playhub-mungtari',
+}
 export const MAX_SCORE = 1_000_000_000
 
 export function validateScore(score: number) {

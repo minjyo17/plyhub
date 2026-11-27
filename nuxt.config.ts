@@ -6,6 +6,8 @@ export default defineNuxtConfig({
     public: {
       nakamaUrl: 'http://127.0.0.1:7350',
       snakeGameUrl: 'http://127.0.0.1:3318',
+      cosmicMergeGameUrl: 'http://127.0.0.1:3319',
+      mungtariGameUrl: 'http://127.0.0.1:3320',
       // Client connection key, never a console password or session signing key.
       nakamaServerKey: 'playhub-local-server-key',
     },
