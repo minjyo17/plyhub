@@ -8,6 +8,7 @@ const ALLOWED_PLATFORMS = new Set([
   'http://localhost:3317',
   'http://127.0.0.1:3000',
   'http://localhost:3000',
+  'https://plyhub.vercel.app', // 배포 포털
 ]);
 
 export const embedded = window.parent !== window;
