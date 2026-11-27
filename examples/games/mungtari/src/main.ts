@@ -1,11 +1,13 @@
 // 화면·입력·진행. 판정은 전부 sim.ts(applyAction)에 맡기고, 여기서는 보여주기만 한다.
 import {
-  applyAction, createMatch, launchPoint, makeRng, previewPath, dogHitboxes, DOG_X, RULES, WORLD,
+  applyAction, createMatch, launchPoint, makeRng, other, previewPath, dogHitboxes, DOG_X, RULES, WORLD,
   type Action, type BoneResult, type ItemId, type MatchState, type Pt, type Side,
 } from './sim.ts';
 import { planBotShot, type Difficulty } from './bot.ts';
-import { embedded, reportHeight, saveScore } from './platform.ts';
-import { img, isSoundOn, play, preloadImages, setSoundOn, startBgm } from './assets.ts';
+import { connection, embedded, reportHeight, saveScore } from './platform.ts';
+import { cleanName, makeCode, normalizeCode, parseMsg, CODE_LENGTH, type Msg } from './online.ts';
+import type { Player, Room } from '@playhub/game-sdk';
+import { img, imageUrl, isSoundOn, play, preloadImages, setSoundOn, startBgm } from './assets.ts';
 import { INK, drawBackground, drawBone, drawBubble, drawDog, drawFence, drawItemIcon, drawPaw } from './draw.ts';
 
 // ── 조정 포인트: 연출 ─────────────────────────────────
@@ -14,7 +16,9 @@ const FLIGHT_SPEED = 1.3; // 뼈다귀 날아가는 재생 속도 (1 = 실제 �
 const DOUBLE_DELAY = 0.28; // 더블 뼈다귀 두 번째가 출발하는 간격 (초)
 const AFTER_SHOT = 1.0; // 착탄 후 다음 턴까지 쉬는 시간
 
-const NAMES: Record<Side, string> = { left: '콩이', right: '보리' };
+// 기본 이름. 친구 대전에서는 각자 정한 이름(names)으로 바뀐다.
+const DEFAULT_NAMES: Record<Side, string> = { left: '콩이', right: '보리' };
+let names: Record<Side, string> = { ...DEFAULT_NAMES };
 const ITEM_INFO: Record<ItemId, { name: string; desc: string }> = {
   double: { name: '더블', desc: '같은 궤도로 2개 연속 던지기 (두 번째는 살짝 짧게)' },
   big: { name: '왕뼈다귀', desc: '데미지 1.5배. 무거워서 바람은 덜 타지만 덜 날아가요' },
@@ -32,7 +36,8 @@ const gaugeLastLabel = $('gauge-last-label');
 const itemsEl = $('items');
 const hintEl = $('hint');
 
-type Phase = 'menu' | 'aim' | 'charge' | 'bot' | 'fly' | 'over';
+// remote: 친구 차례(친구 대전), wait: 내가 던진 수를 방장에게 보내고 결과를 기다리는 중(게스트)
+type Phase = 'menu' | 'lobby' | 'aim' | 'charge' | 'bot' | 'remote' | 'wait' | 'fly' | 'over';
 
 interface Flight {
   shooter: Side;
@@ -49,6 +54,11 @@ interface BotPlan { action: Extract<Action, { kind: 'throw' }>; t: number; start
 
 let phase: Phase = 'menu';
 let difficulty: Difficulty = 'normal';
+// 봇 대전에서는 늘 콩이(left). 친구 대전에서는 방장이 콩이, 게스트가 보리.
+let mode: 'bot' | 'online' = 'bot';
+let me: Side = 'left';
+const foe = () => other(me);
+const foeTurn = () => phase === 'bot' || phase === 'remote';
 let match: MatchState = createMatch(1);
 let botRng = makeRng(1);
 let t = 0;
@@ -83,9 +93,17 @@ window.addEventListener('resize', resize);
 resize();
 
 // ── 게임 시작 / 턴 진행 ────────────────────────────────
+const newSeed = () => (Date.now() ^ Math.floor(Math.random() * 0x7fffffff)) >>> 0;
+
 function newGame(level: Difficulty) {
   difficulty = level;
-  const seed = (Date.now() ^ Math.floor(Math.random() * 0x7fffffff)) >>> 0;
+  mode = 'bot';
+  me = 'left';
+  names = { ...DEFAULT_NAMES };
+  resetBoard(newSeed());
+}
+
+function resetBoard(seed: number) {
   match = createMatch(seed, 'left');
   botRng = makeRng(seed ^ 0xb0b1);
   shownHp = { left: RULES.HP, right: RULES.HP };
@@ -97,6 +115,7 @@ function newGame(level: Difficulty) {
   puffs = [];
   flight = null;
   $('menu').hidden = true;
+  $('lobby').hidden = true;
   $('result').hidden = true;
   startBgm();
   startTurn();
@@ -106,19 +125,36 @@ function startTurn() {
   timer = RULES.TURN_SECONDS;
   power = 0;
   selected = null;
-  banner = { text: `${NAMES[match.current]} 차례`, life: 1.4 };
-  if (match.current === 'left') {
+  const online = mode === 'online';
+  banner = { text: online ? (match.current === me ? '내 차례!' : `친구(${names[match.current]}) 차례`) : `${names[match.current]} 차례`, life: 1.4 };
+  if (match.current === me) {
     phase = 'aim';
+  } else if (online) {
+    phase = 'remote';
   } else {
     phase = 'bot';
     const action = planBotShot(match, difficulty, botRng) as BotPlan['action'];
     botPlan = { action, t: 0, startAim: aim.right };
   }
   renderItems();
+  pump();
 }
 
-function fire(shooter: Side, action: Action) {
-  const { state: next, shot } = applyAction(match, action);
+// decided: 친구 대전에서 방장이 보내 준 판정 결과. 게스트는 이 상태를 그대로 따른다.
+function fire(shooter: Side, action: Action, decided?: MatchState) {
+  if (mode === 'online' && !isHost() && !decided) {
+    // 게스트는 판정하지 않는다. 내 수를 방장에게 보내고 결과(result)를 기다린다.
+    if (action.kind === 'throw') lastPower[shooter] = Math.min(action.power, 1);
+    send({ t: 'throw', turn: match.turn, action });
+    phase = 'wait';
+    power = 0;
+    renderItems();
+    pump();
+    return;
+  }
+  const { state: computed, shot } = applyAction(match, action);
+  const next = decided ?? computed;
+  if (mode === 'online' && isHost()) send({ t: 'result', turn: match.turn, action, state: next });
   power = 0;
   if (!shot) {
     // 시간 초과
@@ -130,6 +166,7 @@ function fire(shooter: Side, action: Action) {
   }
   if (action.kind === 'throw') {
     lastPower[shooter] = Math.min(action.power, 1);
+    aim[shooter] = action.angle;
     if (action.item) say(shooter, ITEM_INFO[action.item].name + '!');
   }
   fx[shooter].throwing = 1;
@@ -152,7 +189,7 @@ function endTurn() {
   windShown = match.wind;
   if (match.over) {
     phase = 'over';
-    play(match.winner === 'left' ? 'win' : 'lose');
+    play(match.winner === me ? 'win' : 'lose');
     setTimeout(showResult, 900);
     renderItems();
     return;
@@ -161,13 +198,15 @@ function endTurn() {
 }
 
 function showResult() {
+  if (!match.over) return; // 결과를 띄우기 전에 새 판이 시작됐다
+  if (mode === 'online') return showOnlineResult();
+  paintResultButtons();
   const w = match.winner;
   $('result-title').textContent = w === 'left' ? '콩이 승리!' : w === 'right' ? '보리 승리…' : '무승부';
   const why = match.hp.left <= 0 || match.hp.right <= 0 ? '' : `${RULES.MAX_TURNS}턴이 끝나서 HP가 많은 쪽이 이겼어요. `;
   $('result-sub').textContent =
     w === 'left' ? `${why}보리가 꼬리를 내렸어요.` : w === 'right' ? `${why}다음엔 바람을 더 잘 읽어 봐요.` : '둘 다 지쳐서 같이 낮잠을 자요.';
-  $('result-left').textContent = String(match.hp.left);
-  $('result-right').textContent = String(match.hp.right);
+  paintResultHp();
   $('result').hidden = false;
   void saveWin();
 }
@@ -203,7 +242,7 @@ function say(side: Side, text: string) {
 // ── 착탄 연출 ─────────────────────────────────────────
 function onLand(bone: BoneResult, shooter: Side) {
   const p = bone.points[bone.points.length - 1];
-  if (shooter === 'left' && bone.outcome !== 'out') lastLanding = p;
+  if (shooter === me && bone.outcome !== 'out') lastLanding = p;
   const color = bone.victim === 'left' ? '#d64b3c' : bone.victim === 'right' ? '#d64b3c' : INK;
 
   if (bone.outcome === 'out') {
@@ -240,10 +279,10 @@ function toWorld(e: PointerEvent): Pt {
   return { x: ((e.clientX - r.left) / r.width) * WORLD.W, y: ((e.clientY - r.top) / r.height) * WORLD.H };
 }
 function aimAt(p: Pt) {
-  const o = launchPoint('left');
-  const dx = Math.max(p.x - o.x, 0.001);
+  const o = launchPoint(me);
+  const dx = Math.max((p.x - o.x) * (me === 'left' ? 1 : -1), 0.001);
   const dy = o.y - p.y;
-  aim.left = Math.round(Math.min(90, Math.max(0, (Math.atan2(dy, dx) * 180) / Math.PI)));
+  aim[me] = Math.round(Math.min(90, Math.max(0, (Math.atan2(dy, dx) * 180) / Math.PI)));
 }
 const myTurn = () => phase === 'aim' || phase === 'charge';
 
@@ -258,16 +297,19 @@ canvas.addEventListener('pointermove', (e) => {
   if (myTurn()) aimAt(toWorld(e));
 });
 const release = () => {
-  if (phase === 'charge') fire('left', { kind: 'throw', angle: aim.left, power, item: selected });
+  if (phase === 'charge') fire(me, { kind: 'throw', angle: aim[me], power, item: selected });
 };
 canvas.addEventListener('pointerup', release);
 canvas.addEventListener('pointercancel', release);
 
 // 키보드: ←→(또는 ↑↓)로 각도, 스페이스 꾹 눌러 던지기
 window.addEventListener('keydown', (e) => {
-  if (!myTurn()) return;
-  if (e.key === 'ArrowUp' || e.key === 'ArrowLeft') aim.left = Math.min(90, aim.left + 1);
-  else if (e.key === 'ArrowDown' || e.key === 'ArrowRight') aim.left = Math.max(0, aim.left - 1);
+  if (!myTurn() || e.target instanceof HTMLInputElement) return;
+  // 화살표 왼쪽/오른쪽은 내 강아지가 보는 방향 기준 (보리는 거꾸로)
+  const up = me === 'left' ? 'ArrowLeft' : 'ArrowRight';
+  const down = me === 'left' ? 'ArrowRight' : 'ArrowLeft';
+  if (e.key === 'ArrowUp' || e.key === up) aim[me] = Math.min(90, aim[me] + 1);
+  else if (e.key === 'ArrowDown' || e.key === down) aim[me] = Math.max(0, aim[me] - 1);
   else if (e.code === 'Space' && phase === 'aim' && !e.repeat) {
     phase = 'charge';
     power = 0;
@@ -281,18 +323,400 @@ window.addEventListener('keyup', (e) => {
 document.querySelectorAll<HTMLButtonElement>('[data-level]').forEach((b) =>
   b.addEventListener('click', () => newGame(b.dataset.level as Difficulty)),
 );
-$('again').addEventListener('click', () => newGame(difficulty));
+$('again').addEventListener('click', () => {
+  if (mode === 'online') hostStart();
+  else newGame(difficulty);
+});
 $('to-menu').addEventListener('click', () => {
+  if (mode === 'online') leaveOnline('');
   $('result').hidden = true;
   $('menu').hidden = false;
   phase = 'menu';
 });
 
+// ── 친구 대전 (초대코드 1:1) ──────────────────────────
+// 방장이 판정한다. 게스트는 내 수(throw)를 보내고, 방장이 보낸 결과(result)대로 연출만 한다.
+const REMOTE_GRACE = 5; // 친구 차례 시간이 끝나고 이만큼 더 기다린 뒤 방장이 시간 초과로 넘긴다
+const AIM_INTERVAL = 0.1; // 조준 중계 간격 (초)
+let room: Room | null = null;
+let rival: Player | null = null;
+let myId = '';
+let inbox: Extract<Msg, { turn: number }>[] = [];
+let aimClock = 0;
+let onlineNote = ''; // 결과 화면에 덧붙일 말 (친구가 나감 등)
+let busy = false;
+let host = false; // 판정하는 쪽(방을 만든 사람). 강아지(me)와는 따로다.
+let rivalName = ''; // 대기실에서 친구가 정한 이름 (비면 기본 이름)
+const isHost = () => host;
+const myName = () => cleanName($<HTMLInputElement>('my-name').value);
+
+function send(msg: Msg) {
+  room?.send(msg).catch(() => {
+    if (msg.t !== 'aim') hintEl.textContent = '친구에게 보내지 못했어요. 연결을 확인해 주세요.';
+  });
+}
+
+function streamAim(dt: number) {
+  aimClock += dt;
+  if (aimClock < AIM_INTERVAL) return;
+  aimClock = 0;
+  send({ t: 'aim', angle: aim[me], power: phase === 'charge' ? Math.min(power, 1) : 0, item: selected });
+}
+
+// 받은 수·결과를 지금 턴에 맞을 때 처리한다. 연출 중이면 끝날 때까지 쌓아 둔다.
+function pump() {
+  while (mode === 'online' && inbox.length) {
+    const msg = inbox[0];
+    if (msg.turn < match.turn || match.over) { inbox.shift(); continue; }
+    if (msg.turn > match.turn) return;
+    if (msg.t === 'result' && !isHost()) {
+      if (phase === 'fly' || phase === 'over') return;
+      inbox.shift();
+      selectedBot = null;
+      fire(match.current, msg.action, msg.state);
+      return;
+    }
+    if (msg.t === 'throw' && isHost()) {
+      if (phase !== 'remote') return;
+      inbox.shift();
+      selectedBot = null;
+      fire(foe(), msg.action);
+      return;
+    }
+    inbox.shift(); // 내가 받을 수 없는 종류 (방장에게 온 result 등)
+  }
+}
+
+function onRoomMessage(data: unknown, from: Player) {
+  const msg = parseMsg(data);
+  if (!msg || !rival || from.userId !== rival.userId) return;
+  if (msg.t === 'lobby') {
+    // 게스트: 방장이 고른 강아지의 반대쪽이 내 강아지
+    if (isHost() || phase !== 'lobby') return;
+    me = other(msg.side);
+    rivalName = msg.name;
+    paintLobby();
+    send({ t: 'hello', name: myName() });
+    return;
+  }
+  if (msg.t === 'hello') {
+    if (!isHost() || phase !== 'lobby') return;
+    rivalName = msg.name;
+    paintLobby();
+    return;
+  }
+  if (msg.t === 'start') {
+    if (isHost()) return;
+    if (msg.guest !== myId) return leaveOnline('방이 꽉 찼어요. 다른 코드로 들어가 주세요.');
+    if (phase !== 'lobby' && phase !== 'over') return;
+    me = other(msg.hostSide);
+    names = { ...msg.names };
+    beginOnline(msg.seed);
+    return;
+  }
+  if (msg.t === 'aim') {
+    if (phase !== 'remote') return;
+    aim[foe()] = msg.angle;
+    power = msg.power;
+    selectedBot = msg.item;
+    return;
+  }
+  inbox.push(msg);
+  pump();
+}
+
+function onRoomPlayers({ joined, left }: { joined: Player[]; left: Player[] }) {
+  if (rival && left.some((p) => p.userId === rival!.userId)) {
+    if (phase === 'lobby' && isHost()) {
+      rival = null;
+      rivalName = '';
+      paintLobby();
+      $('lobby-note').textContent = '친구가 나갔어요. 코드를 다시 보내 주세요.';
+      return;
+    }
+    endOnline(phase === 'lobby' ? '방장이 방을 나갔어요.' : '친구가 방을 나갔어요.', true);
+    return;
+  }
+  // 방장: 처음 들어온 한 명이 친구. 그 뒤에 온 사람은 start의 guest가 자기가 아니라서 스스로 나간다.
+  if (isHost() && !rival && phase === 'lobby' && joined.length) {
+    rival = joined[0];
+    rivalName = '';
+    $('lobby-note').textContent = '친구가 들어왔어요! 준비되면 시작하기를 눌러 주세요.';
+    paintLobby();
+    sendLobby();
+  }
+}
+
+function sendLobby() {
+  if (isHost() && rival) send({ t: 'lobby', side: me, name: myName() });
+}
+
+// 방장이 시작 (대기실의 시작하기, 결과 화면의 한 판 더). 이름은 대기실에서 정한 그대로 쓴다.
+function hostStart() {
+  if (!isHost() || !rival || !room) return;
+  if (phase === 'lobby') {
+    names = { [me]: myName() || DEFAULT_NAMES[me], [foe()]: rivalName || DEFAULT_NAMES[foe()] } as Record<Side, string>;
+  }
+  const seed = newSeed();
+  send({ t: 'start', seed, guest: rival.userId, hostSide: me, names });
+  beginOnline(seed);
+}
+
+function beginOnline(seed: number) {
+  mode = 'online';
+  inbox = [];
+  aimClock = 0;
+  onlineNote = '';
+  selectedBot = null;
+  resetBoard(seed);
+}
+
+function enterRoom(r: Room, side: Side, hostPlayer: Player | null) {
+  room = r;
+  me = side;
+  host = hostPlayer === null;
+  rival = hostPlayer;
+  rivalName = '';
+  mode = 'online';
+  inbox = [];
+  onlineNote = '';
+  r.onMessage(onRoomMessage);
+  r.onPlayers(onRoomPlayers);
+  r.onClose(() => {
+    if (room === r) endOnline('연결이 끊겼어요.', false);
+  });
+}
+
+// 대전 도중 방이 끝남 (친구가 나감·연결 끊김). 남은 사람이 이긴 걸로 한다.
+function endOnline(reason: string, iWin: boolean) {
+  const r = room;
+  room = null;
+  rival = null;
+  inbox = [];
+  void r?.leave();
+  if (phase === 'lobby' || phase === 'menu') return showMenu(reason);
+  onlineNote = reason;
+  if (phase !== 'over') {
+    if (flight) match = flight.next; // 날아가던 수의 결과까지는 반영한다
+    targetHp = { ...match.hp };
+    flight = null;
+    power = 0;
+    match = { ...match, over: true, winner: iWin ? me : null };
+    phase = 'over';
+    renderItems();
+    showOnlineResult();
+  } else if (!$('result').hidden) showOnlineResult();
+}
+
+// 내가 나감
+function leaveOnline(note: string) {
+  const r = room;
+  room = null;
+  rival = null;
+  inbox = [];
+  void r?.leave();
+  showMenu(note);
+}
+
+function showMenu(note: string) {
+  mode = 'bot';
+  me = 'left';
+  host = false;
+  names = { ...DEFAULT_NAMES };
+  phase = 'menu';
+  $('lobby').hidden = true;
+  $('result').hidden = true;
+  $('menu').hidden = false;
+  $('online-note').textContent = note;
+  renderItems();
+}
+
+function showLobby(code: string) {
+  phase = 'lobby';
+  $('menu').hidden = true;
+  $('result').hidden = true;
+  $('lobby').hidden = false;
+  $('lobby-code').textContent = code;
+  $('lobby-title').textContent = isHost() ? '강아지와 이름을 정하고 친구를 기다려요' : '친구 방에 들어왔어요!';
+  $('lobby-note').textContent = isHost() ? '이 코드를 친구에게 보내 주세요.' : '방장이 시작하면 바로 시작해요.';
+  $('lobby-code-row').hidden = !isHost();
+  $('lobby-start').hidden = !isHost();
+  $<HTMLInputElement>('my-name').value = '';
+  paintLobby();
+}
+
+// 대기실: 내 강아지 표시, 이름 칸 placeholder(고른 강아지의 기본 이름), 친구 상태, 시작 버튼
+function paintLobby() {
+  document.querySelectorAll<HTMLButtonElement>('.dog-btn').forEach((b) => {
+    const side = b.dataset.side as Side;
+    b.setAttribute('aria-checked', String(side === me));
+    b.disabled = !isHost(); // 게스트는 남은 강아지로 자동
+    b.querySelector('span')!.textContent = DEFAULT_NAMES[side];
+    const im = b.querySelector('img')!;
+    if (!im.getAttribute('src')) im.src = imageUrl(side === 'left' ? 'kong-idle' : 'bori-idle');
+  });
+  $<HTMLInputElement>('my-name').placeholder = DEFAULT_NAMES[me];
+  const friend = rivalName || DEFAULT_NAMES[foe()];
+  $('friend-line').textContent = rival ? `친구: ${friend} (${DEFAULT_NAMES[foe()]})` : '친구: 기다리는 중…';
+  $<HTMLButtonElement>('lobby-start').disabled = !rival;
+}
+
+function paintResultHp() {
+  $('result-left-name').textContent = names.left;
+  $('result-right-name').textContent = names.right;
+  $('result-left').textContent = String(match.hp.left);
+  $('result-right').textContent = String(match.hp.right);
+}
+
+function showOnlineResult() {
+  const w = match.winner;
+  $('result-title').textContent = w === me ? '내가 이겼다!' : w === 'draw' ? '무승부' : w ? '친구가 이겼어요' : '대전 종료';
+  const why = match.hp.left <= 0 || match.hp.right <= 0 ? '' : `${RULES.MAX_TURNS}턴이 끝나서 HP가 많은 쪽이 이겼어요. `;
+  $('result-sub').textContent =
+    onlineNote || (w === me ? `${why}친구를 이겼어요!` : w === 'draw' ? '둘 다 지쳐서 같이 낮잠을 자요.' : `${why}다음엔 바람을 더 잘 읽어 봐요.`);
+  paintResultHp();
+  $('result-save').textContent = '친구 대전은 랭킹에 저장하지 않아요';
+  paintResultButtons();
+  $('result').hidden = false;
+}
+
+function paintResultButtons() {
+  const again = $<HTMLButtonElement>('again');
+  const toMenu = $('to-menu');
+  if (mode !== 'online') {
+    again.hidden = false;
+    again.disabled = false;
+    again.textContent = '다시 하기';
+    toMenu.textContent = '난이도 바꾸기';
+    return;
+  }
+  toMenu.textContent = room ? '방 나가기' : '처음으로';
+  again.hidden = !room || !rival;
+  again.disabled = !isHost();
+  again.textContent = isHost() ? '한 판 더' : '방장이 다시 시작하면 시작돼요';
+}
+
+async function readySdk() {
+  const sdk = await connection;
+  if (!sdk) {
+    $('online-note').textContent = embedded ? 'PlayHub에 연결되지 않아 친구 대전을 할 수 없어요' : 'PlayHub 포털에서 열면 친구와 대전할 수 있어요';
+    return null;
+  }
+  myId = sdk.user.userId;
+  return sdk;
+}
+
+async function createRoom() {
+  if (busy) return;
+  busy = true;
+  $('online-note').textContent = '방을 만드는 중…';
+  try {
+    const sdk = await readySdk();
+    if (!sdk) return;
+    // 아주 드물게 이미 누가 쓰는 코드면 다른 코드로 다시 만든다
+    for (let i = 0; i < 3; i++) {
+      const code = makeCode();
+      const r = await sdk.joinRoom(code);
+      if (r.others.length === 0) {
+        $('online-note').textContent = '';
+        enterRoom(r, 'left', null);
+        showLobby(code);
+        return;
+      }
+      await r.leave();
+    }
+    $('online-note').textContent = '방을 만들지 못했어요. 다시 눌러 주세요.';
+  } catch {
+    $('online-note').textContent = '방을 만들지 못했어요. 연결을 확인해 주세요.';
+  } finally {
+    busy = false;
+  }
+}
+
+async function joinByCode(raw: string) {
+  if (busy) return;
+  const code = normalizeCode(raw);
+  if (code.length !== CODE_LENGTH) {
+    $('online-note').textContent = `초대코드 ${CODE_LENGTH}자리를 입력해 주세요`;
+    return;
+  }
+  busy = true;
+  $('online-note').textContent = '방에 들어가는 중…';
+  try {
+    const sdk = await readySdk();
+    if (!sdk) return;
+    const r = await sdk.joinRoom(code);
+    if (r.others.length !== 1) {
+      await r.leave();
+      $('online-note').textContent = r.others.length ? '방이 꽉 찼어요' : '그 코드의 방을 찾지 못했어요';
+      return;
+    }
+    $('online-note').textContent = '';
+    enterRoom(r, 'right', r.others[0]);
+    showLobby(code);
+    send({ t: 'hello', name: '' });
+  } catch {
+    $('online-note').textContent = '방에 들어가지 못했어요. 연결을 확인해 주세요.';
+  } finally {
+    busy = false;
+  }
+}
+
+$('room-create').addEventListener('click', () => void createRoom());
+const codeInput = $<HTMLInputElement>('room-code');
+codeInput.addEventListener('input', () => {
+  codeInput.value = normalizeCode(codeInput.value);
+});
+$('room-join').addEventListener('click', () => void joinByCode(codeInput.value));
+codeInput.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') void joinByCode(codeInput.value);
+});
+$('lobby-leave').addEventListener('click', () => leaveOnline(''));
+$('lobby-start').addEventListener('click', () => hostStart());
+document.querySelectorAll<HTMLButtonElement>('.dog-btn').forEach((b) =>
+  b.addEventListener('click', () => {
+    if (!isHost() || phase !== 'lobby') return;
+    me = b.dataset.side as Side;
+    paintLobby();
+    sendLobby();
+  }),
+);
+const nameInput = $<HTMLInputElement>('my-name');
+nameInput.addEventListener('input', () => {
+  if (phase !== 'lobby') return;
+  if (isHost()) sendLobby();
+  else send({ t: 'hello', name: myName() });
+});
+$('lobby-copy').addEventListener('click', async () => {
+  const el = $('lobby-code');
+  const code = el.textContent ?? '';
+  let ok = false;
+  try {
+    await navigator.clipboard.writeText(code);
+    ok = true;
+  } catch {
+    // iframe에서 클립보드 권한이 없으면 글자를 선택해서 복사한다
+    const range = document.createRange();
+    range.selectNodeContents(el);
+    const sel = getSelection();
+    sel?.removeAllRanges();
+    sel?.addRange(range);
+    try { ok = document.execCommand('copy'); } catch { ok = false; }
+  }
+  $('lobby-note').textContent = ok ? '복사했어요! 친구에게 보내 주세요.' : '코드를 선택해 두었어요. 복사해서 친구에게 보내 주세요.';
+});
+if (!embedded) {
+  $<HTMLButtonElement>('room-create').disabled = true;
+  $<HTMLButtonElement>('room-join').disabled = true;
+  codeInput.disabled = true;
+  $('online-note').textContent = 'PlayHub 포털에서 열면 친구와 대전할 수 있어요';
+}
+
 // ── 아이템 칸 ─────────────────────────────────────────
 function renderItems() {
   itemsEl.innerHTML = '';
   for (let i = 0; i < RULES.START_ITEMS; i++) {
-    const id = match.items.left[i];
+    const id = match.items[me][i];
     const btn = document.createElement('button');
     btn.className = 'item';
     if (!id) {
@@ -324,6 +748,8 @@ function updateHint() {
   if (phase === 'aim' || phase === 'charge') {
     hintEl.textContent = selected ? `${ITEM_INFO[selected].name} 장착! ${ITEM_INFO[selected].desc}` : '꾸욱 눌러서 힘을 모으고, 떼면 던져요. 게이지 끝까지 가면 맵 밖으로!';
   } else if (phase === 'bot') hintEl.textContent = '보리가 바람을 재는 중…';
+  else if (phase === 'remote') hintEl.textContent = `친구(${names[foe()]})가 조준하는 중…`;
+  else if (phase === 'wait') hintEl.textContent = '던지는 중…';
   else if (phase === 'fly') hintEl.textContent = '';
   else hintEl.textContent = '';
 }
@@ -356,11 +782,19 @@ function update(dt: number) {
       power += dt / CHARGE_SECONDS;
       if (power >= 1) {
         power = 1;
-        fire('left', { kind: 'throw', angle: aim.left, power: 1, item: selected });
+        fire(me, { kind: 'throw', angle: aim[me], power: 1, item: selected });
         return;
       }
     }
-    if (timer <= 0) fire('left', { kind: 'skip' });
+    if (timer <= 0) {
+      fire(me, { kind: 'skip' });
+      return;
+    }
+    if (mode === 'online') streamAim(dt);
+  } else if (phase === 'remote') {
+    timer -= dt;
+    // 게스트의 수가 끝내 안 오면 방장이 시간 초과로 넘긴다
+    if (isHost() && timer <= -REMOTE_GRACE) fire(foe(), { kind: 'skip' });
   } else if (phase === 'bot' && botPlan) {
     // 보리: 1초 동안 각도를 맞추고, 그다음 힘을 모아서 던진다
     timer -= dt;
@@ -421,19 +855,19 @@ function render() {
       aim: aim[s],
       hurt: fx[s].hurt,
       throwing: fx[s].throwing,
-      charging: (phase === 'charge' && s === 'left') || (phase === 'bot' && s === 'right' && power > 0),
+      charging: (phase === 'charge' && s === me) || (foeTurn() && s === foe() && power > 0),
       mood: winner === s ? 'happy' : winner && winner !== 'draw' ? 'sad' : 'idle',
     });
   }
 
   // 조준선
-  const shooter: Side | null = myTurn() ? 'left' : phase === 'bot' ? 'right' : null;
+  const shooter: Side | null = myTurn() ? me : foeTurn() ? foe() : null;
   if (shooter) drawAim(shooter);
 
   // 킁킁 코 미리보기
   if (myTurn() && selected === 'sniff') {
-    const p = phase === 'charge' ? Math.min(power, 0.99) : lastPower.left ?? 0.65;
-    const pts = previewPath({ side: 'left', angle: aim.left, power: p, wind: match.wind });
+    const p = phase === 'charge' ? Math.min(power, 0.99) : lastPower[me] ?? 0.65;
+    const pts = previewPath({ side: me, angle: aim[me], power: p, wind: match.wind });
     ctx.fillStyle = 'rgba(74,52,40,0.7)';
     pts.forEach((pt, i) => {
       if (i % 4 !== 0 || pt.y < 0) return;
@@ -517,12 +951,12 @@ function render() {
   drawHud();
 
   // 게이지 (HTML)
-  const shownPower = phase === 'charge' || (phase === 'bot' && power > 0) ? power : 0;
+  const shownPower = phase === 'charge' || (foeTurn() && power > 0) ? power : 0;
   gaugeFill.style.width = `${shownPower * 100}%`;
   gaugeFill.classList.toggle('hot', shownPower > 0.9);
-  const lp = lastPower.left;
+  const lp = lastPower[me];
   // 지난번에 던진 힘 눈금 (다음 턴에 힘 조절할 때 기준으로 쓰라고)
-  const showLast = lp != null && phase !== 'bot';
+  const showLast = lp != null && !foeTurn();
   gaugeLast.style.display = gaugeLastLabel.style.display = showLast ? 'block' : 'none';
   if (lp != null) gaugeLast.style.left = gaugeLastLabel.style.left = `${lp * 100}%`;
 }
@@ -531,7 +965,7 @@ function drawAim(side: Side) {
   const o = launchPoint(side);
   const f = side === 'left' ? 1 : -1;
   const a = (aim[side] * Math.PI) / 180;
-  const charging = side === 'left' ? phase === 'charge' : power > 0;
+  const charging = side === me ? phase === 'charge' : power > 0;
   const len = 46 + (charging ? power : 0) * 70;
   ctx.save();
   ctx.strokeStyle = 'rgba(74,52,40,0.7)';
@@ -611,9 +1045,11 @@ function drawHud() {
     ctx.fillStyle = INK;
     ctx.textBaseline = 'middle';
     ctx.textAlign = s === 'left' ? 'left' : 'right';
-    ctx.fillText(NAMES[s], s === 'left' ? x + 12 : x + w - 12, y + 22);
-    const bx = s === 'left' ? x + 58 : x + 12;
-    const bw = w - 70;
+    // 이름 길이(최대 6글자)에 맞춰 HP 바 길이를 줄인다
+    const nameW = Math.min(ctx.measureText(names[s]).width, 96);
+    ctx.fillText(names[s], s === 'left' ? x + 12 : x + w - 12, y + 22, 96);
+    const bx = s === 'left' ? x + 22 + nameW : x + 12;
+    const bw = w - 34 - nameW;
     ctx.fillStyle = '#eadfcc';
     ctx.beginPath();
     ctx.roundRect(bx, y + 14, bw, 16, 8);
@@ -629,11 +1065,18 @@ function drawHud() {
     ctx.fillStyle = INK;
     ctx.textAlign = 'center';
     ctx.fillText(String(Math.round(targetHp[s])), bx + bw / 2, y + 23);
-    // 보리가 장착한 아이템 표시
-    if (s === 'right' && selectedBot) {
+    // 상대(봇·친구)가 장착한 아이템 표시
+    if (s === foe() && selectedBot && foeTurn()) {
       ctx.font = '700 12px system-ui, sans-serif';
-      ctx.textAlign = 'right';
-      ctx.fillText(`보리: ${ITEM_INFO[selectedBot].name} 장착`, x + w, y + 60);
+      ctx.textAlign = s === 'left' ? 'left' : 'right';
+      ctx.fillText(`${names[s]}: ${ITEM_INFO[selectedBot].name} 장착`, s === 'left' ? x : x + w, y + 60);
+    }
+    // 친구 대전: 내 강아지 표시
+    if (mode === 'online' && s === me) {
+      ctx.font = '800 12px system-ui, sans-serif';
+      ctx.fillStyle = '#d64b3c';
+      ctx.textAlign = s === 'left' ? 'left' : 'right';
+      ctx.fillText('▲ 나', s === 'left' ? x + 12 : x + w - 12, y + 60);
     }
   }
 
@@ -676,7 +1119,7 @@ function drawHud() {
   // 타이머 + 턴
   const tx = cx;
   const ty = 82;
-  const live = phase === 'aim' || phase === 'charge' || phase === 'bot';
+  const live = phase === 'aim' || phase === 'charge' || foeTurn();
   const sec = Math.max(0, Math.ceil(timer));
   ctx.fillStyle = 'rgba(255,250,241,0.92)';
   ctx.beginPath();
@@ -741,5 +1184,7 @@ if ((import.meta as unknown as { env?: { DEV?: boolean } }).env?.DEV) {
   (window as unknown as Record<string, unknown>).__mungtari = {
     get match() { return match; },
     get phase() { return phase; },
+    get mode() { return mode; },
+    get me() { return me; },
   };
 }

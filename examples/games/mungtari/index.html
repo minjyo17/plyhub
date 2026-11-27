@@ -27,6 +27,41 @@
             <button data-level="normal" class="primary">보통</button>
             <button data-level="hard">어려움</button>
           </div>
+          <div class="online">
+            <p class="pick">친구와 1:1 대전</p>
+            <div class="online-row">
+              <button id="room-create" type="button" class="primary">방 만들기</button>
+              <!-- 포털 iframe은 sandbox(allow-forms 없음)라 form 제출이 막힌다. 클릭·Enter로 처리한다 -->
+              <div class="join">
+                <input id="room-code" maxlength="6" placeholder="초대코드" autocomplete="off" spellcheck="false" aria-label="초대코드 6자리">
+                <button id="room-join" type="button">참여</button>
+              </div>
+            </div>
+            <p id="online-note" class="online-note" role="status"></p>
+          </div>
+        </div>
+      </div>
+
+      <div id="lobby" class="overlay" hidden>
+        <div class="card lobby-card">
+          <p id="lobby-title" class="pick"></p>
+          <div id="lobby-code-row" class="code-row">
+            <span id="lobby-code" class="code"></span>
+            <button id="lobby-copy" type="button">코드 복사</button>
+          </div>
+          <div class="dog-pick" role="radiogroup" aria-label="내 강아지">
+            <button type="button" class="dog-btn" data-side="left" role="radio"><img alt=""><span>콩이</span></button>
+            <button type="button" class="dog-btn" data-side="right" role="radio"><img alt=""><span>보리</span></button>
+          </div>
+          <label class="name-field">내 강아지 이름
+            <input id="my-name" maxlength="6" autocomplete="off" spellcheck="false">
+          </label>
+          <p id="friend-line" class="friend-line"></p>
+          <p id="lobby-note" class="result-sub"></p>
+          <div class="levels">
+            <button id="lobby-start" type="button" class="primary">시작하기</button>
+            <button id="lobby-leave" type="button">나가기</button>
+          </div>
         </div>
       </div>
 
@@ -35,8 +70,8 @@
           <p id="result-title" class="result-title"></p>
           <p id="result-sub" class="result-sub"></p>
           <div class="hp-summary">
-            <div><span>콩이</span><b id="result-left">0</b></div>
-            <div><span>보리</span><b id="result-right">0</b></div>
+            <div><span id="result-left-name">콩이</span><b id="result-left">0</b></div>
+            <div><span id="result-right-name">보리</span><b id="result-right">0</b></div>
           </div>
           <p id="result-save" class="result-save" role="status"></p>
           <div class="levels">

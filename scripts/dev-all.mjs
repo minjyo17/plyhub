@@ -30,6 +30,10 @@ for (const dir of games) {
   if (result.status !== 0) process.exit(result.status ?? 1)
 }
 
+// 셸에 PORT가 잡혀 있으면 게임 서버(sdk-demo)가 그 포트를 먼저 잡아 포털이 밀려난다. 자식에게는 넘기지 않는다.
+const childEnv = { ...process.env, FORCE_COLOR: '1' }
+delete childEnv.PORT
+
 const COLORS = [36, 35, 33, 32, 34, 31]
 const tasks = [
   { name: 'portal', cwd: root, args: ['run', 'dev', '--', '--host', '127.0.0.1', '--port', PORTAL_PORT] },
@@ -54,7 +58,7 @@ tasks.forEach((task, index) => {
   // detached: npm이 띄운 vite·nuxt 같은 손자 프로세스까지 그룹으로 같이 끄기 위해
   const child = spawn(npm, task.args, {
     cwd: task.cwd,
-    env: { ...process.env, FORCE_COLOR: '1' },
+    env: childEnv,
     stdio: ['ignore', 'pipe', 'pipe'],
     detached: process.platform !== 'win32',
   })

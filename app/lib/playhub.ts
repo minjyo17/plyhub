@@ -1,9 +1,18 @@
-import { Client, type LeaderboardRecord, type Session } from '@heroiclabs/nakama-js'
+import { Client, type LeaderboardRecord, type Presence, type Session } from '@heroiclabs/nakama-js'
 
 export type GuestUser = { userId: string; displayName: string }
 export type RankEntry = GuestUser & { rank: number; score: number }
 export type Ranking = { records: RankEntry[]; myRecord: RankEntry | null }
 export type ConnectionOptions = { url: string; serverKey: string }
+// 실시간 방(relay match). 같은 게임에서 같은 코드로 들어오면 같은 방이 된다.
+export type RoomHandlers = {
+  onData: (data: unknown, from: GuestUser) => void
+  onPresence: (joined: GuestUser[], left: GuestUser[]) => void
+  onClose: () => void
+}
+export type RoomHandle = { others: GuestUser[]; send: (data: unknown) => Promise<void>; leave: () => Promise<void> }
+export const ROOM_CODE = /^[A-Z0-9]{4,12}$/
+export const MAX_ROOM_MESSAGE = 4096
 type GuestStorage = Pick<Storage, 'getItem' | 'setItem'>
 
 const LEADERBOARDS: Record<string, string> = {
@@ -48,6 +57,10 @@ function mapRecord(record: LeaderboardRecord): RankEntry {
     rank: record.rank,
     score: record.score!,
   }
+}
+
+function toPlayer(presence: Presence): GuestUser {
+  return { userId: presence.user_id, displayName: presence.username || `guest_${presence.user_id.slice(0, 8)}` }
 }
 
 // One SDK instance per mounted browser view. No server-global sessions or stored JWTs.
@@ -133,6 +146,56 @@ export function createPlayHubSdk(options: ConnectionOptions, storage: GuestStora
       validateScore(score)
       const leaderboardId = leaderboardFor(gameId)
       await authenticated(active => client.writeLeaderboardRecord(active, leaderboardId, { score: String(score) }))
+    },
+    // 방 하나에 소켓 하나. 나가면(leave) 소켓도 닫는다.
+    async joinRoom(gameId: string, code: string, handlers: RoomHandlers): Promise<RoomHandle> {
+      if (!ROOM_CODE.test(code)) throw new Error('Invalid room code')
+      const active = await ensureSession()
+      const socket = client.createSocket(url.protocol === 'https:', false)
+      let closed = false
+      socket.ondisconnect = () => {
+        if (closed) return
+        closed = true
+        handlers.onClose()
+      }
+      await socket.connect(active, false)
+      try {
+        const match = await socket.createMatch(`${gameId}:${code}`)
+        const self = match.self.session_id
+        const others = (list?: Presence[]) => (list || []).filter(p => p.session_id !== self).map(toPlayer)
+        socket.onmatchdata = event => {
+          if (event.match_id !== match.match_id || !event.presence || event.presence.session_id === self) return
+          let data: unknown
+          try { data = JSON.parse(new TextDecoder().decode(event.data)) } catch { return }
+          handlers.onData(data, toPlayer(event.presence))
+        }
+        socket.onmatchpresence = event => {
+          if (event.match_id !== match.match_id) return
+          const joined = others(event.joins)
+          const left = others(event.leaves)
+          if (joined.length || left.length) handlers.onPresence(joined, left)
+        }
+        return {
+          others: others(match.presences),
+          async send(data: unknown) {
+            const text = JSON.stringify(data)
+            if (closed) throw new Error('Room closed')
+            if (!text || text.length > MAX_ROOM_MESSAGE) throw new Error('Invalid room message')
+            // 문자열로 넘기면 nakama-js가 btoa로 인코딩해서 한글 등 non-Latin1 글자에서 예외가 난다. UTF-8 바이트로 보낸다.
+            await socket.sendMatchState(match.match_id, 1, new TextEncoder().encode(text))
+          },
+          async leave() {
+            if (closed) return
+            closed = true
+            try { await socket.leaveMatch(match.match_id) } catch { /* 소켓을 닫으면 서버도 정리한다 */ }
+            socket.disconnect(false)
+          },
+        }
+      } catch (error) {
+        closed = true
+        socket.disconnect(false)
+        throw error
+      }
     },
     async getTop(gameId: string, limit = 10): Promise<Ranking> {
       const leaderboardId = leaderboardFor(gameId)
