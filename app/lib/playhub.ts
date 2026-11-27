@@ -181,7 +181,8 @@ export function createPlayHubSdk(options: ConnectionOptions, storage: GuestStora
             const text = JSON.stringify(data)
             if (closed) throw new Error('Room closed')
             if (!text || text.length > MAX_ROOM_MESSAGE) throw new Error('Invalid room message')
-            await socket.sendMatchState(match.match_id, 1, text)
+            // 문자열로 넘기면 nakama-js가 btoa로 인코딩해서 한글 등 non-Latin1 글자에서 예외가 난다. UTF-8 바이트로 보낸다.
+            await socket.sendMatchState(match.match_id, 1, new TextEncoder().encode(text))
           },
           async leave() {
             if (closed) return
