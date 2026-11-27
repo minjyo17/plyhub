@@ -2,7 +2,7 @@
 import { games } from '~/lib/games'
 useHead({ title: 'PlayHub · 가볍게 시작하는 한 판' })
 const search = ref('')
-const visibleGames = computed(() => games.filter(game => `${game.title} 스네이크 ${game.description} ${game.genre}`.toLocaleLowerCase().includes(search.value.trim().toLocaleLowerCase())))
+const visibleGames = computed(() => games.filter(game => `${game.title} ${game.description} ${game.genre} ${game.tags.join(' ')}`.toLocaleLowerCase().includes(search.value.trim().toLocaleLowerCase())))
 </script>
 <template>
   <main id="main-content" class="catalogue-page">
@@ -26,7 +26,7 @@ const visibleGames = computed(() => games.filter(game => `${game.title} 스네�
       <div class="catalogue-meta"><span class="category-pill">전체 게임</span><span>다운로드 없이, 바로 시작하세요.</span></div>
       <div v-if="visibleGames.length" class="game-grid">
         <NuxtLink v-for="game in visibleGames" :key="game.id" class="game-card" :to="`/games/${game.id}`">
-          <div class="game-cover"><SnakeArtwork /><span class="cover-badge">바로 플레이</span><span class="cover-arrow" aria-hidden="true">↗</span></div>
+          <div class="game-cover"><GameArtwork :game-id="game.id" /><span class="cover-badge">바로 플레이</span><span class="cover-arrow" aria-hidden="true">↗</span></div>
           <div class="game-card-body"><div class="game-card-heading"><h3>{{ game.title }}</h3><span>{{ game.genre }}</span></div><p>{{ game.description }}</p><span class="game-card-link">게임 상세 보기 <span aria-hidden="true">→</span></span></div>
         </NuxtLink>
       </div>
