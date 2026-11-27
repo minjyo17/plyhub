@@ -7,6 +7,10 @@ import { connectPlayHub } from '@playhub/game-sdk'
 const playhub = await connectPlayHub({ platformOrigin: 'http://127.0.0.1:3317' })
 await playhub.submitScore(10)
 const ranking = await playhub.getTop(10)
+// 실시간 방: 같은 코드로 들어온 사람끼리 메시지를 주고받는다
+const room = await playhub.joinRoom('K7Q2X9')
+room.onMessage((data, from) => console.log(from.displayName, data))
+await room.send({ hello: true })
 playhub.dispose()
 ```
 

@@ -49,6 +49,7 @@ function launch() {
       gameId: current.id, gameOrigin: url.origin, user: user.value,
       submitScore: (id, score) => sdk.submitScore(id, score),
       getTop: (id, limit) => sdk.getTop(id, limit),
+      joinRoom: (id, code, handlers) => sdk.joinRoom(id, code, handlers),
       onConnect: () => { connected.value = true; connectionError.value = ''; clearTimeout(connectTimer) },
       onSaved: score => { savedMessage.value = `최근 저장: ${score}점 · 최고 기록에 반영했어요.`; refreshKey.value++ },
     })
@@ -68,7 +69,7 @@ onBeforeUnmount(() => { clearTimeout(connectTimer); disposeBridge?.(); stopResiz
     <section v-else-if="!user" class="play-login-panel"><h2>나만의 기록을 시작해 볼까요?</h2><p>로그인하면 바로 게임을 즐길 수 있어요.</p><button class="hub-button hub-button-dark" @click="openLogin()">로그인하고 플레이</button></section>
     <template v-else>
       <p v-if="connectionError" class="feedback error" role="alert">{{ connectionError }}<button class="ranking-retry" @click="launch">게임 다시 열기</button></p>
-      <iframe v-if="src" ref="frame" :src="src" :title="`${game.title} 게임`" class="game-frame" :style="frameStyle" sandbox="allow-scripts allow-same-origin" referrerpolicy="no-referrer" />
+      <iframe v-if="src" ref="frame" :src="src" :title="`${game.title} 게임`" class="game-frame" :style="frameStyle" sandbox="allow-scripts allow-same-origin" allow="clipboard-write" referrerpolicy="no-referrer" />
       <div class="game-toolbar"><p role="status">{{ savedMessage || '한 판이 끝나면 최고 점수가 기록됩니다.' }}</p><button class="hub-button hub-button-outline" @click="launch">게임 새로 열기</button></div>
       <p class="reload-note">게임을 새로 열면 진행 중인 판과 저장하지 못한 점수는 사라집니다.</p>
       <GameRanking :game-id="game.id" :refresh-key="refreshKey" />

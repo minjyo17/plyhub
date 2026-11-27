@@ -7,6 +7,8 @@ export class PlayHubError extends Error {
 const fail = (code, message) => new PlayHubError(code, message)
 const isRecord = value => value && typeof value === 'object' && !Array.isArray(value)
 const validUser = value => isRecord(value) && typeof value.userId === 'string' && typeof value.displayName === 'string'
+const roomCode = /^[A-Z0-9]{4,12}$/
+const maxRoomMessage = 4096
 const validRank = value => validUser(value) && Number.isSafeInteger(value.rank) && value.rank > 0 && Number.isSafeInteger(value.score) && value.score >= 0 && value.score <= maxScore
 
 export async function connectPlayHub({ platformOrigin, timeoutMs = 15000 } = {}) {
@@ -19,9 +21,16 @@ export async function connectPlayHub({ platformOrigin, timeoutMs = 15000 } = {})
   const clientId = crypto.randomUUID()
   const pending = new Map()
   let disposed = false
+  let room = null
+  let early = null // joinRoom 응답보다 먼저 온 방 이벤트
   function receive(event) {
     if (event.source !== host || event.origin !== platformOrigin) return
     const data = event.data
+    if (isRecord(data) && data.channel === channel && data.type === 'event' && data.clientId === clientId) {
+      if (room) room.handle(data.event, data.payload)
+      else if (early && early.length < 64) early.push([data.event, data.payload])
+      return
+    }
     if (!isRecord(data) || data.channel !== channel || data.type !== 'response' || data.clientId !== clientId || typeof data.id !== 'string') return
     const item = pending.get(data.id)
     if (!item) return
@@ -34,6 +43,7 @@ export async function connectPlayHub({ platformOrigin, timeoutMs = 15000 } = {})
   function dispose() {
     if (disposed) return
     disposed = true
+    room?.close()
     window.removeEventListener('message', receive)
     for (const item of pending.values()) {
       clearTimeout(item.timer); clearInterval(item.retry)
@@ -82,6 +92,77 @@ export async function connectPlayHub({ platformOrigin, timeoutMs = 15000 } = {})
       if (!isRecord(result) || !Array.isArray(result.records) || result.records.length > limit || !result.records.every(validRank) || (result.myRecord !== null && !validRank(result.myRecord))) throw fail('INVALID_RESPONSE', '잘못된 랭킹 응답입니다.')
       return result
     },
+    // 실시간 방. 같은 게임에서 같은 코드로 들어온 사람끼리 메시지를 주고받는다.
+    async joinRoom(code) {
+      if (typeof code !== 'string' || !roomCode.test(code)) throw fail('INVALID_ARGUMENT', '방 코드는 영문 대문자·숫자 4~12자여야 합니다.')
+      room?.close()
+      room = null
+      const buffered = early = []
+      let result
+      try { result = await request('joinRoom', { code }) } finally { if (early === buffered) early = null }
+      if (!isRecord(result) || result.code !== code || !Array.isArray(result.others) || !result.others.every(validUser)) throw fail('INVALID_RESPONSE', '잘못된 방 응답입니다.')
+      room = createRoom(code, result.others)
+      for (const [event, payload] of buffered) room.handle(event, payload)
+      return room.api
+    },
     dispose,
+  }
+
+  function createRoom(code, initial) {
+    const listeners = { message: new Set(), players: new Set(), close: new Set() }
+    // 리스너를 달기 전에 온 메시지·입장 소식은 모아 뒀다가 처음 리스너가 생기면 전달한다
+    const backlog = { message: [], players: [] }
+    let others = initial.map(player => ({ userId: player.userId, displayName: player.displayName }))
+    let closed = false
+    const on = type => listener => {
+      if (typeof listener !== 'function') throw fail('INVALID_ARGUMENT', '리스너는 함수여야 합니다.')
+      listeners[type].add(listener)
+      const waiting = backlog[type]?.splice(0)
+      if (waiting?.length) queueMicrotask(() => { for (const args of waiting) if (!closed || type !== 'message') call(type, ...args) })
+      return () => listeners[type].delete(listener)
+    }
+    const call = (type, ...args) => {
+      if (!listeners[type].size && backlog[type]) { if (backlog[type].length < 64) backlog[type].push(args); return }
+      for (const listener of listeners[type]) { try { listener(...args) } catch (error) { console.error(error) } }
+    }
+    const self = {
+      close() {
+        if (closed) return
+        closed = true
+        if (room === self) room = null
+        call('close')
+      },
+      handle(event, payload) {
+        if (closed || !isRecord(payload)) return
+        if (event === 'roomData' && validUser(payload.from)) call('message', payload.data, { userId: payload.from.userId, displayName: payload.from.displayName })
+        else if (event === 'roomPresence' && Array.isArray(payload.joined) && Array.isArray(payload.left) && [...payload.joined, ...payload.left].every(validUser)) {
+          const gone = new Set(payload.left.map(player => player.userId))
+          others = others.filter(player => !gone.has(player.userId))
+          for (const player of payload.joined) if (!others.some(item => item.userId === player.userId)) others.push({ userId: player.userId, displayName: player.displayName })
+          call('players', { joined: payload.joined, left: payload.left })
+        } else if (event === 'roomClosed') self.close()
+      },
+      api: Object.freeze({
+        code,
+        get others() { return others.map(player => ({ ...player })) },
+        get closed() { return closed },
+        async send(data) {
+          if (closed) throw fail('NO_ROOM', '이미 나간 방입니다.')
+          let text
+          try { text = JSON.stringify(data) } catch { text = '' }
+          if (!isRecord(data) || !text || text.length > maxRoomMessage) throw fail('INVALID_ARGUMENT', `방 메시지는 ${maxRoomMessage}자 이하의 JSON 객체여야 합니다.`)
+          await request('roomSend', { data })
+        },
+        async leave() {
+          if (closed) return
+          self.close()
+          try { await request('leaveRoom') } catch { /* 이미 끊긴 연결이면 포털이 정리한다 */ }
+        },
+        onMessage: on('message'),
+        onPlayers: on('players'),
+        onClose: on('close'),
+      }),
+    }
+    return self
   }
 }
