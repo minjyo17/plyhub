@@ -156,9 +156,28 @@ S1 최종 통합 검증과 새 Linux 설치 재현까지 완료했습니다. 최
 - https://nuxt.com/docs/4.x/getting-started/installation
 - https://nuxt.com/docs/4.x/guide/concepts/typescript
 
+## 포털과 게임 한 번에 실행
+
+백엔드를 띄운 뒤 터미널 하나에서:
+
+```sh
+npm run dev:all
+```
+
+포털(3317)과 `examples/games/` 아래 모든 게임 서버를 같이 띄웁니다. 각 줄 앞에 어느 서버의 로그인지 표시되고, Ctrl+C 한 번으로 전부 종료합니다. 게임 폴더에 `node_modules`가 없으면 먼저 설치합니다.
+
+| 서버 | 주소 |
+|---|---|
+| 포털 | http://127.0.0.1:3317 |
+| Snake Garden (sdk-demo) | http://127.0.0.1:3318 |
+| 코스믹 머지 | http://127.0.0.1:3319 |
+| 멍타리 대전 | http://127.0.0.1:3320 |
+
+게임은 포털과 다른 출처여야 해서 포트가 각각 다릅니다. 포털 포트는 `PORTAL_PORT=3000 npm run dev:all`처럼 바꿀 수 있습니다 (게임의 허용 목록에는 3317·3000만 있습니다).
+
 ## 독립 게임 실행
 
-포털과 별도의 터미널에서 실행합니다.
+게임 하나만 따로 띄울 때는 포털과 별도의 터미널에서 실행합니다.
 
 ```sh
 cd examples/games/sdk-demo
