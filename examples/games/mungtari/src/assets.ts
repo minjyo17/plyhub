@@ -9,6 +9,9 @@ const urlOf = (file: string): string | undefined => urls[`../assets/${file}`];
 
 const images = new Map<string, HTMLImageElement>();
 
+// <img>에 바로 넣을 주소 (대기실 강아지 고르기 등)
+export const imageUrl = (name: string): string => urlOf(`${name}.png`) ?? '';
+
 // 이름만 주면 된다: img('kong-idle') → assets/kong-idle.png
 export function img(name: string): HTMLImageElement | null {
   let el = images.get(name);

@@ -5,9 +5,9 @@ import {
 } from './sim.ts';
 import { planBotShot, type Difficulty } from './bot.ts';
 import { connection, embedded, reportHeight, saveScore } from './platform.ts';
-import { makeCode, normalizeCode, parseMsg, CODE_LENGTH, type Msg } from './online.ts';
+import { cleanName, makeCode, normalizeCode, parseMsg, CODE_LENGTH, type Msg } from './online.ts';
 import type { Player, Room } from '@playhub/game-sdk';
-import { img, isSoundOn, play, preloadImages, setSoundOn, startBgm } from './assets.ts';
+import { img, imageUrl, isSoundOn, play, preloadImages, setSoundOn, startBgm } from './assets.ts';
 import { INK, drawBackground, drawBone, drawBubble, drawDog, drawFence, drawItemIcon, drawPaw } from './draw.ts';
 
 // ── 조정 포인트: 연출 ─────────────────────────────────
@@ -16,7 +16,9 @@ const FLIGHT_SPEED = 1.3; // 뼈다귀 날아가는 재생 속도 (1 = 실제 �
 const DOUBLE_DELAY = 0.28; // 더블 뼈다귀 두 번째가 출발하는 간격 (초)
 const AFTER_SHOT = 1.0; // 착탄 후 다음 턴까지 쉬는 시간
 
-const NAMES: Record<Side, string> = { left: '콩이', right: '보리' };
+// 기본 이름. 친구 대전에서는 각자 정한 이름(names)으로 바뀐다.
+const DEFAULT_NAMES: Record<Side, string> = { left: '콩이', right: '보리' };
+let names: Record<Side, string> = { ...DEFAULT_NAMES };
 const ITEM_INFO: Record<ItemId, { name: string; desc: string }> = {
   double: { name: '더블', desc: '같은 궤도로 2개 연속 던지기 (두 번째는 살짝 짧게)' },
   big: { name: '왕뼈다귀', desc: '데미지 1.5배. 무거워서 바람은 덜 타지만 덜 날아가요' },
@@ -97,6 +99,7 @@ function newGame(level: Difficulty) {
   difficulty = level;
   mode = 'bot';
   me = 'left';
+  names = { ...DEFAULT_NAMES };
   resetBoard(newSeed());
 }
 
@@ -123,7 +126,7 @@ function startTurn() {
   power = 0;
   selected = null;
   const online = mode === 'online';
-  banner = { text: online ? (match.current === me ? '내 차례!' : `친구(${NAMES[match.current]}) 차례`) : `${NAMES[match.current]} 차례`, life: 1.4 };
+  banner = { text: online ? (match.current === me ? '내 차례!' : `친구(${names[match.current]}) 차례`) : `${names[match.current]} 차례`, life: 1.4 };
   if (match.current === me) {
     phase = 'aim';
   } else if (online) {
@@ -203,8 +206,7 @@ function showResult() {
   const why = match.hp.left <= 0 || match.hp.right <= 0 ? '' : `${RULES.MAX_TURNS}턴이 끝나서 HP가 많은 쪽이 이겼어요. `;
   $('result-sub').textContent =
     w === 'left' ? `${why}보리가 꼬리를 내렸어요.` : w === 'right' ? `${why}다음엔 바람을 더 잘 읽어 봐요.` : '둘 다 지쳐서 같이 낮잠을 자요.';
-  $('result-left').textContent = String(match.hp.left);
-  $('result-right').textContent = String(match.hp.right);
+  paintResultHp();
   $('result').hidden = false;
   void saveWin();
 }
@@ -343,7 +345,10 @@ let inbox: Extract<Msg, { turn: number }>[] = [];
 let aimClock = 0;
 let onlineNote = ''; // 결과 화면에 덧붙일 말 (친구가 나감 등)
 let busy = false;
-const isHost = () => me === 'left';
+let host = false; // 판정하는 쪽(방을 만든 사람). 강아지(me)와는 따로다.
+let rivalName = ''; // 대기실에서 친구가 정한 이름 (비면 기본 이름)
+const isHost = () => host;
+const myName = () => cleanName($<HTMLInputElement>('my-name').value);
 
 function send(msg: Msg) {
   room?.send(msg).catch(() => {
@@ -385,10 +390,28 @@ function pump() {
 function onRoomMessage(data: unknown, from: Player) {
   const msg = parseMsg(data);
   if (!msg || !rival || from.userId !== rival.userId) return;
+  if (msg.t === 'lobby') {
+    // 게스트: 방장이 고른 강아지의 반대쪽이 내 강아지
+    if (isHost() || phase !== 'lobby') return;
+    me = other(msg.side);
+    rivalName = msg.name;
+    paintLobby();
+    send({ t: 'hello', name: myName() });
+    return;
+  }
+  if (msg.t === 'hello') {
+    if (!isHost() || phase !== 'lobby') return;
+    rivalName = msg.name;
+    paintLobby();
+    return;
+  }
   if (msg.t === 'start') {
     if (isHost()) return;
     if (msg.guest !== myId) return leaveOnline('방이 꽉 찼어요. 다른 코드로 들어가 주세요.');
-    if (phase === 'lobby' || phase === 'over') beginOnline(msg.seed);
+    if (phase !== 'lobby' && phase !== 'over') return;
+    me = other(msg.hostSide);
+    names = { ...msg.names };
+    beginOnline(msg.seed);
     return;
   }
   if (msg.t === 'aim') {
@@ -406,23 +429,36 @@ function onRoomPlayers({ joined, left }: { joined: Player[]; left: Player[] }) {
   if (rival && left.some((p) => p.userId === rival!.userId)) {
     if (phase === 'lobby' && isHost()) {
       rival = null;
+      rivalName = '';
+      paintLobby();
       $('lobby-note').textContent = '친구가 나갔어요. 코드를 다시 보내 주세요.';
       return;
     }
     endOnline(phase === 'lobby' ? '방장이 방을 나갔어요.' : '친구가 방을 나갔어요.', true);
     return;
   }
-  // 방장: 처음 들어온 한 명과 바로 시작. 그 뒤에 온 사람은 start의 guest가 자기가 아니라서 스스로 나간다.
+  // 방장: 처음 들어온 한 명이 친구. 그 뒤에 온 사람은 start의 guest가 자기가 아니라서 스스로 나간다.
   if (isHost() && !rival && phase === 'lobby' && joined.length) {
     rival = joined[0];
-    hostStart();
+    rivalName = '';
+    $('lobby-note').textContent = '친구가 들어왔어요! 준비되면 시작하기를 눌러 주세요.';
+    paintLobby();
+    sendLobby();
   }
 }
 
+function sendLobby() {
+  if (isHost() && rival) send({ t: 'lobby', side: me, name: myName() });
+}
+
+// 방장이 시작 (대기실의 시작하기, 결과 화면의 한 판 더). 이름은 대기실에서 정한 그대로 쓴다.
 function hostStart() {
   if (!isHost() || !rival || !room) return;
+  if (phase === 'lobby') {
+    names = { [me]: myName() || DEFAULT_NAMES[me], [foe()]: rivalName || DEFAULT_NAMES[foe()] } as Record<Side, string>;
+  }
   const seed = newSeed();
-  send({ t: 'start', seed, guest: rival.userId });
+  send({ t: 'start', seed, guest: rival.userId, hostSide: me, names });
   beginOnline(seed);
 }
 
@@ -435,10 +471,12 @@ function beginOnline(seed: number) {
   resetBoard(seed);
 }
 
-function enterRoom(r: Room, side: Side, host: Player | null) {
+function enterRoom(r: Room, side: Side, hostPlayer: Player | null) {
   room = r;
   me = side;
-  rival = host;
+  host = hostPlayer === null;
+  rival = hostPlayer;
+  rivalName = '';
   mode = 'online';
   inbox = [];
   onlineNote = '';
@@ -483,6 +521,8 @@ function leaveOnline(note: string) {
 function showMenu(note: string) {
   mode = 'bot';
   me = 'left';
+  host = false;
+  names = { ...DEFAULT_NAMES };
   phase = 'menu';
   $('lobby').hidden = true;
   $('result').hidden = true;
@@ -497,9 +537,35 @@ function showLobby(code: string) {
   $('result').hidden = true;
   $('lobby').hidden = false;
   $('lobby-code').textContent = code;
-  $('lobby-title').textContent = isHost() ? '친구를 기다리는 중…' : '방장이 시작하기를 기다리는 중…';
-  $('lobby-note').textContent = isHost() ? '이 코드를 친구에게 보내 주세요. 친구가 들어오면 바로 시작해요.' : '곧 시작해요!';
-  $('lobby-copy').hidden = !isHost();
+  $('lobby-title').textContent = isHost() ? '강아지와 이름을 정하고 친구를 기다려요' : '친구 방에 들어왔어요!';
+  $('lobby-note').textContent = isHost() ? '이 코드를 친구에게 보내 주세요.' : '방장이 시작하면 바로 시작해요.';
+  $('lobby-code-row').hidden = !isHost();
+  $('lobby-start').hidden = !isHost();
+  $<HTMLInputElement>('my-name').value = '';
+  paintLobby();
+}
+
+// 대기실: 내 강아지 표시, 이름 칸 placeholder(고른 강아지의 기본 이름), 친구 상태, 시작 버튼
+function paintLobby() {
+  document.querySelectorAll<HTMLButtonElement>('.dog-btn').forEach((b) => {
+    const side = b.dataset.side as Side;
+    b.setAttribute('aria-checked', String(side === me));
+    b.disabled = !isHost(); // 게스트는 남은 강아지로 자동
+    b.querySelector('span')!.textContent = DEFAULT_NAMES[side];
+    const im = b.querySelector('img')!;
+    if (!im.getAttribute('src')) im.src = imageUrl(side === 'left' ? 'kong-idle' : 'bori-idle');
+  });
+  $<HTMLInputElement>('my-name').placeholder = DEFAULT_NAMES[me];
+  const friend = rivalName || DEFAULT_NAMES[foe()];
+  $('friend-line').textContent = rival ? `친구: ${friend} (${DEFAULT_NAMES[foe()]})` : '친구: 기다리는 중…';
+  $<HTMLButtonElement>('lobby-start').disabled = !rival;
+}
+
+function paintResultHp() {
+  $('result-left-name').textContent = names.left;
+  $('result-right-name').textContent = names.right;
+  $('result-left').textContent = String(match.hp.left);
+  $('result-right').textContent = String(match.hp.right);
 }
 
 function showOnlineResult() {
@@ -508,8 +574,7 @@ function showOnlineResult() {
   const why = match.hp.left <= 0 || match.hp.right <= 0 ? '' : `${RULES.MAX_TURNS}턴이 끝나서 HP가 많은 쪽이 이겼어요. `;
   $('result-sub').textContent =
     onlineNote || (w === me ? `${why}친구를 이겼어요!` : w === 'draw' ? '둘 다 지쳐서 같이 낮잠을 자요.' : `${why}다음엔 바람을 더 잘 읽어 봐요.`);
-  $('result-left').textContent = String(match.hp.left);
-  $('result-right').textContent = String(match.hp.right);
+  paintResultHp();
   $('result-save').textContent = '친구 대전은 랭킹에 저장하지 않아요';
   paintResultButtons();
   $('result').hidden = false;
@@ -589,6 +654,7 @@ async function joinByCode(raw: string) {
     $('online-note').textContent = '';
     enterRoom(r, 'right', r.others[0]);
     showLobby(code);
+    send({ t: 'hello', name: '' });
   } catch {
     $('online-note').textContent = '방에 들어가지 못했어요. 연결을 확인해 주세요.';
   } finally {
@@ -606,6 +672,21 @@ codeInput.addEventListener('keydown', (e) => {
   if (e.key === 'Enter') void joinByCode(codeInput.value);
 });
 $('lobby-leave').addEventListener('click', () => leaveOnline(''));
+$('lobby-start').addEventListener('click', () => hostStart());
+document.querySelectorAll<HTMLButtonElement>('.dog-btn').forEach((b) =>
+  b.addEventListener('click', () => {
+    if (!isHost() || phase !== 'lobby') return;
+    me = b.dataset.side as Side;
+    paintLobby();
+    sendLobby();
+  }),
+);
+const nameInput = $<HTMLInputElement>('my-name');
+nameInput.addEventListener('input', () => {
+  if (phase !== 'lobby') return;
+  if (isHost()) sendLobby();
+  else send({ t: 'hello', name: myName() });
+});
 $('lobby-copy').addEventListener('click', async () => {
   const el = $('lobby-code');
   const code = el.textContent ?? '';
@@ -667,7 +748,7 @@ function updateHint() {
   if (phase === 'aim' || phase === 'charge') {
     hintEl.textContent = selected ? `${ITEM_INFO[selected].name} 장착! ${ITEM_INFO[selected].desc}` : '꾸욱 눌러서 힘을 모으고, 떼면 던져요. 게이지 끝까지 가면 맵 밖으로!';
   } else if (phase === 'bot') hintEl.textContent = '보리가 바람을 재는 중…';
-  else if (phase === 'remote') hintEl.textContent = `친구(${NAMES[foe()]})가 조준하는 중…`;
+  else if (phase === 'remote') hintEl.textContent = `친구(${names[foe()]})가 조준하는 중…`;
   else if (phase === 'wait') hintEl.textContent = '던지는 중…';
   else if (phase === 'fly') hintEl.textContent = '';
   else hintEl.textContent = '';
@@ -964,9 +1045,11 @@ function drawHud() {
     ctx.fillStyle = INK;
     ctx.textBaseline = 'middle';
     ctx.textAlign = s === 'left' ? 'left' : 'right';
-    ctx.fillText(NAMES[s], s === 'left' ? x + 12 : x + w - 12, y + 22);
-    const bx = s === 'left' ? x + 58 : x + 12;
-    const bw = w - 70;
+    // 이름 길이(최대 6글자)에 맞춰 HP 바 길이를 줄인다
+    const nameW = Math.min(ctx.measureText(names[s]).width, 96);
+    ctx.fillText(names[s], s === 'left' ? x + 12 : x + w - 12, y + 22, 96);
+    const bx = s === 'left' ? x + 22 + nameW : x + 12;
+    const bw = w - 34 - nameW;
     ctx.fillStyle = '#eadfcc';
     ctx.beginPath();
     ctx.roundRect(bx, y + 14, bw, 16, 8);
@@ -986,7 +1069,7 @@ function drawHud() {
     if (s === foe() && selectedBot && foeTurn()) {
       ctx.font = '700 12px system-ui, sans-serif';
       ctx.textAlign = s === 'left' ? 'left' : 'right';
-      ctx.fillText(`${NAMES[s]}: ${ITEM_INFO[selectedBot].name} 장착`, s === 'left' ? x : x + w, y + 60);
+      ctx.fillText(`${names[s]}: ${ITEM_INFO[selectedBot].name} 장착`, s === 'left' ? x : x + w, y + 60);
     }
     // 친구 대전: 내 강아지 표시
     if (mode === 'online' && s === me) {
