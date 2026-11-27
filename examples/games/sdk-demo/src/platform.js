@@ -2,7 +2,7 @@ import { connectPlayHub } from '/sdk/playhub.js'
 
 const embedded = window.parent !== window
 // Deployment setting owned by the game developer. Never trust an arbitrary query origin.
-const allowedPlatforms = new Set(['http://127.0.0.1:3317', 'http://localhost:3317', 'http://127.0.0.1:3000', 'http://localhost:3000'])
+const allowedPlatforms = new Set(['http://127.0.0.1:3317', 'http://localhost:3317', 'http://127.0.0.1:3000', 'http://localhost:3000', 'https://plyhub.vercel.app'])
 const platformOrigin = new URLSearchParams(location.search).get('platformOrigin') || 'http://127.0.0.1:3317'
 const status = document.querySelector('#platform-status')
 const saveStatus = document.querySelector('#save-status')
